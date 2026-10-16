@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import queue
+import threading
 import time
 
 
@@ -207,6 +209,162 @@ def plot_mining_results(results, filename):
     return True
 
 
+# --- Worksheet 4, Task 1: threads sharing a normal dictionary ---
+
+def increment_counter_unsafely(shared_data, read_barrier):
+    """Read and update a shared counter without protecting the update."""
+    current_value = shared_data["counter"]
+    read_barrier.wait()
+    shared_data["counter"] = current_value + 1
+
+
+def demonstrate_unsafe_dictionary(thread_count=5):
+    """Show why a read-modify-write operation needs thread-safe coordination."""
+    if thread_count < 1:
+        raise ValueError("thread_count must be at least 1")
+
+    shared_data = {"counter": 0}
+    read_barrier = threading.Barrier(thread_count)
+    threads = []
+
+    for _ in range(thread_count):
+        thread = threading.Thread(
+            target=increment_counter_unsafely,
+            args=(shared_data, read_barrier),
+        )
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    expected_value = thread_count
+    actual_value = shared_data["counter"]
+    print(f"Expected counter: {expected_value}")
+    print(f"Actual counter: {actual_value}")
+    return shared_data
+
+
+# --- Worksheet 4, Task 2: a thread-safe shared queue ---
+
+def submit_message(shared_queue, client_number):
+    """Put one message into a Queue shared by several threads."""
+    shared_queue.put(f"message from client {client_number}")
+
+
+def demonstrate_thread_safe_queue(thread_count=5):
+    """Show that Queue keeps one message from every producer thread."""
+    if thread_count < 1:
+        raise ValueError("thread_count must be at least 1")
+
+    shared_queue = queue.Queue()
+    threads = []
+
+    for client_number in range(1, thread_count + 1):
+        thread = threading.Thread(
+            target=submit_message,
+            args=(shared_queue, client_number),
+        )
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    received_messages = [shared_queue.get() for _ in range(thread_count)]
+    print(f"Expected messages: {thread_count}")
+    print(f"Received messages: {len(received_messages)}")
+    print(f"Messages: {received_messages}")
+    return received_messages
+
+
+# --- Worksheet 4, Task 3: client and miner threads ---
+
+def client_worker(client_name, mempool, transaction_count, delay):
+    """Periodically submit transactions to the shared mempool."""
+    for transaction_number in range(1, transaction_count + 1):
+        transaction = Transaction(
+            sender=client_name,
+            receiver=f"receiver-{transaction_number}",
+            amount=transaction_number,
+        )
+        mempool.put(transaction)
+        print(f"{client_name} submitted {transaction}")
+        time.sleep(delay)
+
+
+def miner_worker(miner_name, mempool, block_size, blockchain, chain_lock):
+    """Collect transactions from the mempool and turn each batch into a block."""
+    while True:
+        transactions = []
+
+        for _ in range(block_size):
+            transaction = mempool.get()
+
+            if transaction is None:
+                mempool.task_done()
+                return
+
+            transactions.append(transaction)
+            mempool.task_done()
+
+        with chain_lock:
+            previous_hash = blockchain[-1].hash if blockchain else "0" * 64
+            block = Block(transactions, previous_hash)
+            blockchain.append(block)
+
+        print(f"{miner_name} created {block}")
+
+
+def run_client_miner_simulation(
+    client_count=3,
+    transactions_per_client=4,
+    miner_count=2,
+    block_size=3,
+):
+    """Run clients and miners against one shared, thread-safe mempool."""
+    total_transactions = client_count * transactions_per_client
+    if total_transactions % block_size != 0:
+        raise ValueError("total transactions must be divisible by block_size")
+
+    mempool = queue.Queue()
+    blockchain = []
+    chain_lock = threading.Lock()
+
+    miners = []
+    for miner_number in range(1, miner_count + 1):
+        miner = threading.Thread(
+            target=miner_worker,
+            args=(f"miner-{miner_number}", mempool, block_size, blockchain, chain_lock),
+        )
+        miners.append(miner)
+        miner.start()
+
+    clients = []
+    for client_number in range(1, client_count + 1):
+        client = threading.Thread(
+            target=client_worker,
+            args=(f"client-{client_number}", mempool, transactions_per_client, 0.01),
+        )
+        clients.append(client)
+        client.start()
+
+    for client in clients:
+        client.join()
+
+    mempool.join()
+
+    for _ in miners:
+        mempool.put(None)
+
+    for miner in miners:
+        miner.join()
+
+    print(f"Blocks created: {len(blockchain)}")
+    print(f"Valid blockchain: {is_valid_chain(blockchain)}")
+    return blockchain
+
+
 if __name__ == "__main__":
     # Worksheet 3, Task 2: produce 80 transactions and save them to a file.
     producer = TransactionProducer()
@@ -251,3 +409,12 @@ if __name__ == "__main__":
     chain = results[2]
     chain[1].transactions[0].amount = 999
     print(f"Valid after tampering: {is_valid_chain(chain)}")
+
+    print("\nWorksheet 4 - Task 1")
+    demonstrate_unsafe_dictionary()
+
+    print("\nWorksheet 4 - Task 2")
+    demonstrate_thread_safe_queue()
+
+    print("\nWorksheet 4 - Task 3")
+    run_client_miner_simulation()
